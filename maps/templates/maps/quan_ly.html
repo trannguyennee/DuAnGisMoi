@@ -49,13 +49,19 @@
                             {% endif %}
                         </td>
                         <td>
-                            <a href="{% url 'duyet_phan_anh' item.id %}" class="btn btn-success btn-sm" title="Duyệt / Cập nhật">
-                                <i class="fa-solid fa-check"></i>
-                            </a>
-                            
-                            <a href="{% url 'xoa_phan_anh' item.id %}" class="btn btn-danger btn-sm" title="Xóa" onclick="return confirm('Ngài có chắc chắn muốn xóa phản ánh này không? Xóa là mất luôn đó nha!');">
-                                <i class="fa-solid fa-trash"></i>
-                            </a>
+                            <form method="post" action="{% url 'duyet_phan_anh' item.id %}" class="d-inline">
+                                {% csrf_token %}
+                                <button type="submit" class="btn btn-success btn-sm" title="Duyệt / Cập nhật">
+                                    <i class="fa-solid fa-check"></i>
+                                </button>
+                            </form>
+
+                            <form method="post" action="{% url 'admin_xoa_phan_anh' item.id %}" class="d-inline">
+                                {% csrf_token %}
+                                <button type="submit" class="btn btn-danger btn-sm" title="Xóa" onclick="return confirm('Ngài có chắc chắn muốn xóa phản ánh này không? Xóa là mất luôn đó nha!');">
+                                    <i class="fa-solid fa-trash"></i>
+                                </button>
+                            </form>
                         </td>
                     </tr>
                     {% empty %}
@@ -126,7 +132,7 @@
                         <tr>
                             <td>#{{ u.id }}</td>
                             <td class="fw-bold">{{ u.username }}</td>
-                            <td>{{ u.email|default:"<span class='text-muted'>Không có email</span>"|safe }}</td>
+                            <td>{% if u.email %}{{ u.email }}{% else %}<span class="text-muted">Không có email</span>{% endif %}</td>
                             <td>
                                 {% if u.is_superuser %}
                                     <span class="badge bg-danger">Admin Tổng</span>
@@ -147,13 +153,19 @@
                             {% if u.is_superuser %}
                                 <span class="badge bg-light text-muted border"><i class="fa-solid fa-shield"></i> Quyền tối cao</span>
                             {% else %}
-                                <a href="{% url 'khoa_user' u.id %}" class="btn btn-warning btn-sm" title="Khóa / Mở khóa">
-                                    <i class="fa-solid fa-lock"></i>
-                                </a>
-                                
-                                <a href="{% url 'xoa_user' u.id %}" class="btn btn-danger btn-sm" title="Xóa tài khoản" onclick="return confirm('Chắc chắn muốn xóa vĩnh viễn User này không?');">
-                                    <i class="fa-solid fa-user-xmark"></i>
-                                </a>
+                                <form method="post" action="{% url 'khoa_user' u.id %}" class="d-inline">
+                                    {% csrf_token %}
+                                    <button type="submit" class="btn btn-warning btn-sm" title="Khóa / Mở khóa">
+                                        <i class="fa-solid fa-lock"></i>
+                                    </button>
+                                </form>
+
+                                <form method="post" action="{% url 'xoa_user' u.id %}" class="d-inline">
+                                    {% csrf_token %}
+                                    <button type="submit" class="btn btn-danger btn-sm" title="Xóa tài khoản" onclick="return confirm('Chắc chắn muốn xóa vĩnh viễn User này không?');">
+                                        <i class="fa-solid fa-user-xmark"></i>
+                                    </button>
+                                </form>
                             {% endif %}
                         </td>
                         </tr>

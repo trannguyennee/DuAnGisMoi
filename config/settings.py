@@ -5,16 +5,62 @@ import dj_database_url
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-309y67@cg_83uuyclkc6(5z_%q4mgq6@@w%yp)!@20r*rt&x)x'
+# --- Secrets & môi trường ----------------------------------------------------
+# Mọi giá trị nhạy cảm được đọc từ biến môi trường (hoặc file .env khi chạy local).
+# Xem .env.example. TUYỆT ĐỐI không commit SECRET_KEY thật vào git.
+from django.core.exceptions import ImproperlyConfigured
+from dotenv import load_dotenv
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+load_dotenv(BASE_DIR / '.env')
 
-ALLOWED_HOSTS = ['*']
 
-# Thêm dòng này để bảo mật Form và Admin khi chạy online trên Railway
-CSRF_TRUSTED_ORIGINS = ['https://*.railway.app']
+def env_bool(name, default=False):
+    return os.environ.get(name, str(default)).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def env_list(name, default=''):
+    return [item.strip() for item in os.environ.get(name, default).split(',') if item.strip()]
+
+
+# Mặc định TẮT debug. Chỉ bật khi dev local bằng DJANGO_DEBUG=True trong .env
+DEBUG = env_bool('DJANGO_DEBUG', False)
+
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY')
+if not SECRET_KEY:
+    if DEBUG:
+        SECRET_KEY = 'django-insecure-local-dev-only'  # chỉ dùng khi DEBUG  # gitleaks:allow  # nosec B105
+    else:
+        raise ImproperlyConfigured(
+            'Thiếu biến môi trường DJANGO_SECRET_KEY. Tạo key mới bằng: '
+            'python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"'
+        )
+
+ALLOWED_HOSTS = env_list('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1')
+CSRF_TRUSTED_ORIGINS = env_list('DJANGO_CSRF_TRUSTED_ORIGINS')
+
+# Railway tự cấp tên miền public qua biến RAILWAY_PUBLIC_DOMAIN -> không cần dùng '*'
+RAILWAY_DOMAIN = os.environ.get('RAILWAY_PUBLIC_DOMAIN')
+if RAILWAY_DOMAIN:
+    ALLOWED_HOSTS.append(RAILWAY_DOMAIN)
+    CSRF_TRUSTED_ORIGINS.append(f'https://{RAILWAY_DOMAIN}')
+
+# --- Bảo mật khi chạy production (DEBUG=False) --------------------------------
+if not DEBUG:
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')  # Railway đứng sau proxy HTTPS
+    SECURE_SSL_REDIRECT = env_bool('DJANGO_SECURE_SSL_REDIRECT', True)
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = int(os.environ.get('DJANGO_HSTS_SECONDS', '2592000'))  # 30 ngày
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+
+SESSION_COOKIE_HTTPONLY = True
+X_FRAME_OPTIONS = 'DENY'
+
+# Giới hạn upload: ảnh hiện trường tối đa 5 MB (kiểm tra trong views)
+MAX_UPLOAD_IMAGE_BYTES = 5 * 1024 * 1024
+# Phục vụ file media (ảnh upload) qua Django. Tắt nếu chuyển sang S3/CDN.
+SERVE_MEDIA = env_bool('DJANGO_SERVE_MEDIA', True)
 
 # Application definition
 INSTALLED_APPS = [
@@ -30,14 +76,14 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    # WhiteNoise phục vụ file static khi chạy bằng gunicorn (DEBUG=False)
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    # WhiteNoise có thể giúp load static file tốt hơn trên Railway (nếu có cài)
-    # 'whitenoise.middleware.WhiteNoiseMiddleware',
 ]
 
 ROOT_URLCONF = 'config.urls'
@@ -86,6 +132,8 @@ USE_TZ = True
 # Static & Media files
 STATIC_URL = 'static/'
 STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
+# Cho phép WhiteNoise đọc thẳng static trong app, không bắt buộc chạy collectstatic
+WHITENOISE_USE_FINDERS = True
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
@@ -95,17 +143,14 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 LOGIN_URL = 'login'
 
-# Thêm import này ở đầu file hoặc ngay đây cũng được
-# --- CẤU HÌNH GIS RÚT GỌN ---
-# --- CẤU HÌNH GIS CHỐT HẠ ---
-# --- CẤU HÌNH GIS CHỐT HẠ ---
-# --- CẤU HÌNH GIS ĐỒNG BỘ DOCKER ---
-import os
+# --- CẤU HÌNH GIS (GDAL/GEOS) ---
 
-if os.name == 'nt': # Máy Windows của bạn
-    GDAL_LIBRARY_PATH = r'C:\Program Files\PostgreSQL\16\bin\libgdal-35.dll'
-    GEOS_LIBRARY_PATH = r'C:\Program Files\PostgreSQL\16\bin\libgeos_c.dll'
+# Ưu tiên biến môi trường; nếu không có thì dùng đường dẫn mặc định trên Windows.
+if os.name == 'nt':
+    _pg_bin = os.environ.get('POSTGRES_BIN', r'C:\Program Files\PostgreSQL\16\bin')
+    GDAL_LIBRARY_PATH = os.environ.get('GDAL_LIBRARY_PATH', os.path.join(_pg_bin, 'libgdal-35.dll'))
+    GEOS_LIBRARY_PATH = os.environ.get('GEOS_LIBRARY_PATH', os.path.join(_pg_bin, 'libgeos_c.dll'))
 else:
-    # Trên Railway (Linux), lấy trực tiếp từ ENV trong Dockerfile
+    # Linux (Railway/CI): lấy từ ENV, nếu trống Django tự tìm thư viện hệ thống
     GDAL_LIBRARY_PATH = os.environ.get('GDAL_LIBRARY_PATH')
     GEOS_LIBRARY_PATH = os.environ.get('GEOS_LIBRARY_PATH')

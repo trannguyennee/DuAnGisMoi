@@ -1,0 +1,85 @@
+# DevSecOps pipeline: every push / PR goes through 4 security gates + tests.
+#
+#   secrets  -> gitleaks   : no API key / password / SECRET_KEY may enter git
+#   sast     -> bandit     : static analysis of Python code
+#   sca      -> pip-audit  : known CVEs in requirements.txt
+#   test     -> Django test suite on a real PostGIS + `check --deploy`
+name: DevSecOps
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  sast:
+    name: SAST (bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install bandit
+      - run: bandit -r maps config -x maps/tests.py,maps/migrations
+
+  sca:
+    name: Dependency audit (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install pip-audit
+      - run: pip-audit -r requirements.txt
+
+  test:
+    name: Tests + deploy checks (PostGIS)
+    runs-on: ubuntu-latest
+    services:
+      postgis:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgis://postgres:postgres@localhost:5432/postgres
+      DJANGO_DEBUG: "False"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install GDAL / GEOS
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gdal-bin libgdal-dev
+      - run: pip install -r requirements.txt
+      - name: Generate throwaway SECRET_KEY for this run
+        run: echo "DJANGO_SECRET_KEY=$(python -c 'import secrets; print(secrets.token_urlsafe(50))')" >> "$GITHUB_ENV"
+      - name: Django deploy checklist
+        run: python manage.py check --deploy --fail-level WARNING
+      - name: Migrations are up to date
+        run: python manage.py makemigrations --check --dry-run
+      - name: Security test suite
+        env:
+          DJANGO_SECURE_SSL_REDIRECT: "False" # test client speaks plain HTTP
+        run: python manage.py test maps -v 2

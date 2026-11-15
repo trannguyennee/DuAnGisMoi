@@ -23,6 +23,17 @@ from django.contrib import messages
 from django.contrib.auth.models import User
 from django.contrib.gis.geos import Point
 import json
+import logging
+
+from django import forms as dj_forms
+from django.conf import settings
+from django.core.exceptions import ValidationError
+from django.utils.http import url_has_allowed_host_and_scheme
+from django.views.decorators.http import require_POST
+
+from .security import csv_safe, parse_points
+
+logger = logging.getLogger(__name__)
 
 #trang admin 
 @staff_member_required(login_url='login') 
@@ -40,6 +51,7 @@ def trang_quan_ly(request):
     return render(request, 'maps/quan_ly.html', context)
 
 @staff_member_required(login_url='login')
+@require_POST
 def duyet_phan_anh(request, id):
     # Tìm phản ánh theo ID
     phan_anh = get_object_or_404(PhanAnh, id=id)
@@ -55,12 +67,14 @@ def duyet_phan_anh(request, id):
     return redirect('trang_quan_ly') # Làm xong thì load lại trang quản lý
 
 @staff_member_required(login_url='login')
-def xoa_phan_anh(request, id):
+@require_POST
+def admin_xoa_phan_anh(request, id):
     phan_anh = get_object_or_404(PhanAnh, id=id)
     phan_anh.delete() # Lệnh xóa khỏi Database
     return redirect('trang_quan_ly')
 
 @staff_member_required(login_url='login')
+@require_POST
 def khoa_user(request, id):
     user_can_khoa = get_object_or_404(User, id=id)
     
@@ -72,6 +86,7 @@ def khoa_user(request, id):
     return redirect('trang_quan_ly')
 
 @staff_member_required(login_url='login')
+@require_POST
 def xoa_user(request, id):
     user_can_xoa = get_object_or_404(User, id=id)
     
@@ -115,8 +130,12 @@ def login_view(request):
         if form.is_valid():
             user = form.get_user()
             login(request, user)
-            if 'next' in request.GET:
-                return redirect(request.GET.get('next'))
+            next_url = request.GET.get('next')
+            # Chỉ chuyển hướng về trang nội bộ (chống open redirect)
+            if next_url and url_has_allowed_host_and_scheme(
+                next_url, allowed_hosts={request.get_host()}, require_https=request.is_secure()
+            ):
+                return redirect(next_url)
             return redirect('map_home')
     else:
         form = AuthenticationForm()
@@ -127,45 +146,55 @@ def logout_view(request):
     logout(request)
     return redirect('login')
 
-# 7. API Lưu phản ánh (ĐÃ SỬA: LƯU NGƯỜI GỬI)
+# 7. API Lưu phản ánh (kiểm tra dữ liệu đầu vào trước khi lưu)
+@require_POST
 def luu_phan_anh(request):
-    if request.method == 'POST':
+    tieude = (request.POST.get('tieu_de') or '').strip()
+    mota = (request.POST.get('mo_ta') or '').strip()
+    diachi = (request.POST.get('dia_chi') or '').strip()
+    hinh = request.FILES.get('hinh_anh')
+
+    if not tieude or len(tieude) > 200:
+        return JsonResponse({'success': False, 'message': 'Tiêu đề bắt buộc và tối đa 200 ký tự.'}, status=400)
+    if len(diachi) > 255:
+        return JsonResponse({'success': False, 'message': 'Địa chỉ tối đa 255 ký tự.'}, status=400)
+    if len(mota) > 5000:
+        return JsonResponse({'success': False, 'message': 'Mô tả tối đa 5000 ký tự.'}, status=400)
+
+    # Tọa độ: chỉ chấp nhận danh sách {lat, lng} dạng số -> không thể chèn script
+    try:
+        points = parse_points(request.POST.get('points_data') or '')
+    except (ValueError, TypeError):
+        return JsonResponse({'success': False, 'message': 'Dữ liệu tọa độ không hợp lệ.'}, status=400)
+
+    # Ảnh: phải là ảnh thật (Pillow kiểm tra nội dung) và không quá giới hạn dung lượng
+    if hinh:
+        if hinh.size > settings.MAX_UPLOAD_IMAGE_BYTES:
+            return JsonResponse({'success': False, 'message': 'Ảnh tối đa 5 MB.'}, status=400)
         try:
-            tieude = request.POST.get('tieu_de')
-            mota = request.POST.get('mo_ta')
-            toado = request.POST.get('points_data')
-            diachi = request.POST.get('dia_chi') 
-            hinh = request.FILES.get('hinh_anh')
+            dj_forms.ImageField().clean(hinh)
+        except ValidationError:
+            return JsonResponse({'success': False, 'message': 'File tải lên không phải ảnh hợp lệ.'}, status=400)
 
-            new_pa = PhanAnh(
-                tieu_de=tieude,
-                mo_ta=mota,
-                dia_chi=diachi,
-                du_lieu_toa_do=toado,
-                hinh_anh=hinh
-            )
+    new_pa = PhanAnh(
+        tieu_de=tieude,
+        mo_ta=mota,
+        dia_chi=diachi,
+        du_lieu_toa_do=json.dumps(points),
+        hinh_anh=hinh,
+        # LƯU Ý: Point của GeoDjango nhận (Kinh độ, Vĩ độ) - ngược với Google Map
+        vi_tri=Point(points[0]['lng'], points[0]['lat'], srid=4326),
+    )
+    if request.user.is_authenticated:
+        new_pa.nguoi_gui = request.user
 
-            # ===> XỬ LÝ POSTGIS: Tạo đối tượng Point từ tọa độ <===
-            if toado and toado != "[]":
-                try:
-                    points_list = json.loads(toado) # Dịch chuỗi JSON thành List Python
-                    if len(points_list) > 0:
-                        lat = float(points_list[0]['lat'])
-                        lng = float(points_list[0]['lng'])
-                        # LƯU Ý CỰC KỲ QUAN TRỌNG: Point của GeoDjango nhận (Kinh độ, Vĩ độ) - ngược với Google Map
-                        new_pa.vi_tri = Point(lng, lat, srid=4326)
-                except Exception as e:
-                    print("Lỗi chuyển đổi PostGIS:", e)
-
-            if request.user.is_authenticated:
-                new_pa.nguoi_gui = request.user
-            
-            new_pa.save()
-            return JsonResponse({'success': True, 'message': 'Gửi phản ánh thành công!'})
-        except Exception as e:
-            return JsonResponse({'success': False, 'message': str(e)})
-
-    return JsonResponse({'success': False, 'message': 'Yêu cầu không hợp lệ!'})
+    try:
+        new_pa.save()
+    except Exception:
+        # Ghi log chi tiết phía server, không trả lỗi nội bộ cho người dùng
+        logger.exception('Lỗi khi lưu phản ánh')
+        return JsonResponse({'success': False, 'message': 'Không lưu được phản ánh, vui lòng thử lại.'}, status=500)
+    return JsonResponse({'success': True, 'message': 'Gửi phản ánh thành công!'})
 
 # 8. TRANG HỒ SƠ CÁ NHÂN (ĐÃ SỬA: LỌC ĐÚNG CỘT nguoi_gui)
 @login_required
@@ -226,7 +255,8 @@ def trang_thong_ke(request):
     context = {'tong_so': tong_so, 'cho_duyet': cho_duyet, 'dang_xu_ly': dang_xu_ly, 'da_xu_ly': da_xu_ly, 'ty_le': ty_le, 'so_nguoi_dung': User.objects.count(), 'bai_moi': PhanAnh.objects.all().order_by('-id')[:5]}
     return render(request, 'maps/thong_ke.html', context)
 
-@login_required
+@staff_member_required(login_url='login')
+@require_POST
 def cap_nhat_trang_thai(request, id_phan_anh, trang_thai_moi):
     phan_anh = get_object_or_404(PhanAnh, id=id_phan_anh)
     phan_anh.trang_thai = trang_thai_moi
@@ -242,7 +272,8 @@ def api_get_points(request):
             if item.du_lieu_toa_do:
                 parts = item.du_lieu_toa_do.split(',')
                 lat, lng = float(parts[0].strip()), float(parts[1].strip())
-        except: pass
+        except (ValueError, IndexError):
+            lat, lng = 0, 0
         data.append({'id': item.id, 'title': item.tieu_de, 'lat': lat, 'lng': lng, 'status': item.trang_thai, 'image_url': item.hinh_anh.url if item.hinh_anh else '', 'detail_url': f"/chi-tiet/{item.id}/"})
     return JsonResponse(data, safe=False)
 
@@ -257,6 +288,7 @@ def quan_ly_hien_truong(request):
     }
     return render(request, 'maps/quan_ly_hien_truong.html', context)
 
+@staff_member_required(login_url='login')
 def export_excel(request):
     # 1. Cấu hình response là file CSV
     response = HttpResponse(content_type='text/csv')
@@ -274,9 +306,9 @@ def export_excel(request):
     # 5. Lấy dữ liệu và ghi từng dòng
     for pa in PhanAnh.objects.all().order_by('-id'):
         writer.writerow([
-            pa.id, 
-            pa.tieu_de, 
-            pa.du_lieu_toa_do, 
+            pa.id,
+            csv_safe(pa.tieu_de),
+            csv_safe(pa.du_lieu_toa_do),
             pa.thoi_gian.strftime("%d/%m/%Y %H:%M"), 
             pa.get_trang_thai_display()
         ])
@@ -346,6 +378,8 @@ def hotline(request):
     return render(request, 'maps/hotline.html')
 
 
+@login_required
+@require_POST
 def xoa_phan_anh(request, pk):
     # 1. Tìm phản ánh theo ID và phải đúng là của người đang đăng nhập gửi (nguoi_gui=request.user)
     # Để tránh ông A xóa trộm bài của ông B
@@ -397,9 +431,16 @@ def api_quet_vung_postgis(request):
     (Sử dụng hàm __distance_lte của PostGIS)
     """
     # 1. Nhận tọa độ tâm và bán kính từ Frontend gửi lên (mặc định lấy chợ Bến Thành)
-    lat = float(request.GET.get('lat', 10.7725))
-    lng = float(request.GET.get('lng', 106.6980))
-    ban_kinh_met = float(request.GET.get('radius', 500)) 
+    try:
+        lat = float(request.GET.get('lat', 10.7725))
+        lng = float(request.GET.get('lng', 106.6980))
+        ban_kinh_met = float(request.GET.get('radius', 500))
+    except (TypeError, ValueError):
+        return JsonResponse({'error': 'Tham số lat/lng/radius phải là số.'}, status=400)
+    if not (-90 <= lat <= 90 and -180 <= lng <= 180):
+        return JsonResponse({'error': 'Tọa độ nằm ngoài phạm vi.'}, status=400)
+    # Giới hạn bán kính để tránh truy vấn quá nặng
+    ban_kinh_met = min(max(ban_kinh_met, 1), 20000)
 
     # 2. Tạo điểm tâm (Nhớ là Kinh độ trước, Vĩ độ sau)
     tam_diem = Point(lng, lat, srid=4326)

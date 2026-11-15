@@ -1,1 +1,21 @@
-venv/ 
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Secrets — never commit (copy .env.example -> .env)
+.env
+.env.*
+!.env.example
+
+# Local data & user uploads
+db.sqlite3
+media/
+staticfiles/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,4 +1,4 @@
-{% load static %}
+{% load static toa_do %}
 <!DOCTYPE html>
 <html lang="vi">
 <head>
@@ -289,7 +289,7 @@
                     image: "{% if p.hinh_anh %}{{ p.hinh_anh.url }}{% endif %}",
                     status_text: "{{ p.get_trang_thai_display }}",
                     status_code: "{{ p.trang_thai }}",
-                    coords: {{ p.du_lieu_toa_do|safe|default:"[]" }} 
+                    coords: {{ p.du_lieu_toa_do|toa_do_json }} 
                 }
             {% if not forloop.last %},{% endif %}
             {% endfor %}
